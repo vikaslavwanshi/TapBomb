@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-TapBomb — real-time multiplayer dragon-snake battle game. Players control a dragon (snake-like body) and tap/click to explode enemies, growing larger on each kill. Runs in browser and wraps to mobile via Capacitor.
+TapBomb — real-time multiplayer dragon-snake battle game. Dragons run forward constantly; players only steer (keyboard/mouse/joystick) and breathe fireballs (SPACE on desktop, fire button on mobile). A fireball to the head kills; a body hit severs the tail at the impact point and the fallen segments become food orbs. Runs in browser and wraps to mobile via Capacitor.
 
 # Team Claude Code Configuration
 

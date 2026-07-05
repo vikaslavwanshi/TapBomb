@@ -111,6 +111,42 @@ export function playDeath() {
   } catch { /* audio blocked */ }
 }
 
+export function playFireball(volume = 1) {
+  try {
+    const ac = getCtx();
+    const t = ac.currentTime;
+    // Whoosh: filtered noise + a quick pitch drop
+    noise(ac, t, 0.25, 0.2 * volume);
+    const o = ac.createOscillator();
+    o.type = 'sawtooth';
+    o.frequency.setValueAtTime(900, t);
+    o.frequency.exponentialRampToValueAtTime(200, t + 0.22);
+    const g = ac.createGain();
+    g.gain.setValueAtTime(0.12 * volume, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.25);
+    o.connect(g); g.connect(ac.destination);
+    o.start(t); o.stop(t + 0.3);
+  } catch { /* audio blocked */ }
+}
+
+export function playCut() {
+  try {
+    const ac = getCtx();
+    const t = ac.currentTime;
+    // Sharp slice: high blip dropping fast, plus a noise snap
+    noise(ac, t, 0.12, 0.25);
+    const o = ac.createOscillator();
+    o.type = 'square';
+    o.frequency.setValueAtTime(1400, t);
+    o.frequency.exponentialRampToValueAtTime(300, t + 0.1);
+    const g = ac.createGain();
+    g.gain.setValueAtTime(0.15, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.12);
+    o.connect(g); g.connect(ac.destination);
+    o.start(t); o.stop(t + 0.15);
+  } catch { /* audio blocked */ }
+}
+
 export function unlockAudio() {
   // Call on first user gesture to satisfy browser autoplay policy
   try { getCtx(); } catch { /* ignore */ }

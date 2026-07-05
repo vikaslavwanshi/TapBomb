@@ -1,8 +1,16 @@
 import Phaser from 'phaser';
-import type { PlayerState, ServerMessage, Orb } from '@/types/game';
+import type { PlayerState, ServerMessage, Orb, Fireball } from '@/types/game';
 import { GAME_CONFIG } from '@/types/game';
 import { gameStore } from '@/game/gameStore';
-import { playExplosion, playEatOrb, playKill, playDeath, unlockAudio } from '@/utils/sounds';
+import {
+  playExplosion,
+  playEatOrb,
+  playKill,
+  playDeath,
+  playFireball,
+  playCut,
+  unlockAudio,
+} from '@/utils/sounds';
 
 interface DragonSprites {
   head: Phaser.GameObjects.Image;
@@ -17,12 +25,15 @@ const SEND_RATE_MS = 50; // send direction to server at 20hz, not 60fps
 export class GameScene extends Phaser.Scene {
   private players: Record<string, PlayerState> = {};
   private orbs: Record<string, Orb> = {};
+  private fireballs: Record<string, Fireball> = {};
+  private fireballSprites: Record<string, Phaser.GameObjects.Image> = {};
   private orbGraphics!: Phaser.GameObjects.Graphics;
   private orbsDirty = false;
   private sprites: Record<string, DragonSprites> = {};
   private joystickDir = { x: 0, y: 0 };
   private joystick: { base: Phaser.GameObjects.Arc; thumb: Phaser.GameObjects.Arc } | null = null;
   private joystickPointerId: number | null = null;
+  private fireButton: Phaser.GameObjects.Container | null = null;
   private explosionEmitter: Phaser.GameObjects.Particles.ParticleEmitter | null = null;
   private killFeedTexts: Phaser.GameObjects.Text[] = [];
   private keys!: Phaser.Types.Input.Keyboard.CursorKeys & {
@@ -32,6 +43,7 @@ export class GameScene extends Phaser.Scene {
     d: Phaser.Input.Keyboard.Key;
   };
   private sendTimer = 0;
+  private lastFireSent = 0;
   private isTouchDevice = false;
 
   constructor() {
@@ -69,6 +81,7 @@ export class GameScene extends Phaser.Scene {
     // Controls
     this.setupKeyboard();
     this.setupJoystick();
+    this.setupFireButton();
 
     this.input.on('pointerdown', this.onPointerDown, this);
     this.input.on('pointermove', this.onPointerMove, this);
@@ -85,10 +98,10 @@ export class GameScene extends Phaser.Scene {
   }
 
   update(_time: number, delta: number) {
-    // Resolve movement direction (keyboard beats joystick)
+    // Resolve desired heading (keyboard beats joystick beats mouse-hold)
     const dir = this.resolveDirection();
 
-    // Send direction to server at SEND_RATE_MS intervals (not every frame)
+    // Send heading to server at SEND_RATE_MS intervals (not every frame)
     this.sendTimer += delta;
     if (this.sendTimer >= SEND_RATE_MS) {
       this.sendTimer = 0;
@@ -96,6 +109,9 @@ export class GameScene extends Phaser.Scene {
         this.socket.send(JSON.stringify({ type: 'move', direction: dir }));
       }
     }
+
+    // Space breathes fire
+    if (this.keys.space.isDown) this.tryFire();
 
     const me = this.players[this.myId];
     if (me?.alive) {
@@ -108,6 +124,16 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.syncSprites();
+    this.syncFireballs();
+  }
+
+  private tryFire() {
+    const me = this.players[this.myId];
+    if (!me?.alive) return;
+    const now = Date.now();
+    if (now - this.lastFireSent < GAME_CONFIG.fireCooldownMs) return;
+    this.lastFireSent = now;
+    this.socket?.send(JSON.stringify({ type: 'fire' }));
   }
 
   private drawOrbs() {
@@ -176,12 +202,25 @@ export class GameScene extends Phaser.Scene {
     }
     if (msg.type === 'state') {
       this.players = msg.players;
+      this.fireballs = msg.fireballs;
     }
     if (msg.type === 'orb_eaten') {
       delete this.orbs[msg.orbId];
       this.orbs[msg.newOrb.id] = msg.newOrb;
       this.orbsDirty = true;
       if (msg.eaterId === this.myId) playEatOrb(msg.newOrb.value);
+    }
+    if (msg.type === 'orbs_added') {
+      for (const orb of msg.orbs) this.orbs[orb.id] = orb;
+      this.orbsDirty = true;
+    }
+    if (msg.type === 'fireball') {
+      playFireball(msg.fireball.ownerId === this.myId ? 1 : 0.5);
+    }
+    if (msg.type === 'cut') {
+      this.playCutEffect(msg.at.x, msg.at.y, this.players[msg.victim]?.color ?? 0xff8800);
+      if (msg.victim === this.myId || msg.attacker === this.myId) playCut();
+      this.showCutFeed(msg.attacker, msg.victim, msg.segmentsLost);
     }
     if (msg.type === 'explode') {
       this.playExplosion(msg.at.x, msg.at.y, this.players[msg.victim]?.color ?? 0xff4400);
@@ -276,12 +315,7 @@ export class GameScene extends Phaser.Scene {
     if (!sp) return;
 
     const scale = player.size / GAME_CONFIG.initialSize;
-    const headAngle = player.segments.length > 0
-      ? Phaser.Math.RadToDeg(Math.atan2(
-          player.head.y - player.segments[0].y,
-          player.head.x - player.segments[0].x,
-        ))
-      : 0;
+    const headAngle = Phaser.Math.RadToDeg(player.angle);
 
     sp.head.setPosition(player.head.x, player.head.y).setScale(scale).setAngle(headAngle);
     sp.glow.setPosition(player.head.x, player.head.y).setRadius(player.size * scale + 10);
@@ -301,6 +335,67 @@ export class GameScene extends Phaser.Scene {
     sp.killBadge
       .setPosition(player.head.x + player.size * scale, player.head.y - player.size * scale)
       .setText(`×${player.kills}`);
+  }
+
+  // ── Fireball rendering ───────────────────────────────────────────────────
+
+  private syncFireballs() {
+    for (const [id, fb] of Object.entries(this.fireballs)) {
+      let sprite = this.fireballSprites[id];
+      if (!sprite) {
+        sprite = this.add.image(fb.x, fb.y, 'glow_particle')
+          .setTint(0xff6600)
+          .setScale(1.6)
+          .setBlendMode(Phaser.BlendModes.ADD)
+          .setDepth(15);
+        this.fireballSprites[id] = sprite;
+      }
+      sprite.setPosition(fb.x, fb.y);
+      sprite.setRotation(fb.angle);
+      // Flicker for a fiery feel
+      sprite.setScale(1.4 + Math.random() * 0.5);
+    }
+    for (const id of Object.keys(this.fireballSprites)) {
+      if (!this.fireballs[id]) {
+        this.fireballSprites[id].destroy();
+        delete this.fireballSprites[id];
+      }
+    }
+  }
+
+  private playCutEffect(x: number, y: number, color: number) {
+    if (this.explosionEmitter) {
+      const emitter = this.explosionEmitter as Phaser.GameObjects.Particles.ParticleEmitter & {
+        setParticleTint?: (t: number) => void;
+      };
+      emitter.setParticleTint?.(color);
+      this.explosionEmitter.explode(15, x, y);
+    }
+    const ring = this.add.circle(x, y, 6, 0xffaa00, 0.9).setDepth(30);
+    this.tweens.add({
+      targets: ring,
+      scaleX: 4, scaleY: 4, alpha: 0,
+      duration: 250,
+      ease: 'Power2',
+      onComplete: () => ring.destroy(),
+    });
+  }
+
+  private showCutFeed(attackerId: string, victimId: string, segmentsLost: number) {
+    const attackerName = this.players[attackerId]?.name ?? '?';
+    const victimName = this.players[victimId]?.name ?? '?';
+    const txt = this.add.text(
+      this.cameras.main.width - 20,
+      20 + this.killFeedTexts.length * 24,
+      `🔥 ${attackerName} cut ${victimName} (-${segmentsLost})`,
+      { fontSize: '13px', color: '#ffaa44', stroke: '#000', strokeThickness: 2 }
+    ).setOrigin(1, 0).setScrollFactor(0).setDepth(100);
+
+    this.killFeedTexts.push(txt);
+    this.time.delayedCall(3000, () => {
+      txt.destroy();
+      this.killFeedTexts = this.killFeedTexts.filter((t) => t !== txt);
+    });
   }
 
   private destroySprite(id: string) {
@@ -369,6 +464,8 @@ export class GameScene extends Phaser.Scene {
       s: this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.S),
       d: this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.D),
     };
+    // Keep Space from scrolling the page
+    this.input.keyboard!.addCapture(Phaser.Input.Keyboard.KeyCodes.SPACE);
   }
 
   // ── Joystick (touch) ─────────────────────────────────────────────────────
@@ -381,6 +478,21 @@ export class GameScene extends Phaser.Scene {
     this.joystick = { base, thumb };
   }
 
+  private setupFireButton() {
+    if (!this.isTouchDevice) return;
+    const bx = this.scale.width - 80, by = this.scale.height - 100;
+    const ring = this.add.circle(0, 0, 42, 0xff4400, 0.35).setStrokeStyle(3, 0xff6600, 0.9);
+    const icon = this.add.text(0, 0, '🔥', { fontSize: '30px' }).setOrigin(0.5);
+    this.fireButton = this.add.container(bx, by, [ring, icon])
+      .setScrollFactor(0)
+      .setDepth(50);
+  }
+
+  private isOnFireButton(x: number, y: number): boolean {
+    if (!this.fireButton) return false;
+    return Phaser.Math.Distance.Between(x, y, this.fireButton.x, this.fireButton.y) < 60;
+  }
+
   private onPointerDown(pointer: Phaser.Input.Pointer) {
     const jx = this.scale.width / 2, jy = this.scale.height - 100;
     const dist = Phaser.Math.Distance.Between(pointer.x, pointer.y, jx, jy);
@@ -390,10 +502,9 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    // Tap-to-kill (right-click on desktop, or non-joystick tap on mobile)
-    if (!this.input.activePointer.rightButtonDown?.()) {
-      const worldPt = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
-      this.tryTapKill(worldPt.x, worldPt.y);
+    // Fire button (touch devices)
+    if (this.isTouchDevice && this.isOnFireButton(pointer.x, pointer.y)) {
+      this.tryFire();
     }
   }
 
@@ -415,22 +526,6 @@ export class GameScene extends Phaser.Scene {
       this.joystickPointerId = null;
       this.joystickDir = { x: 0, y: 0 };
       if (this.joystick) this.joystick.thumb.setPosition(this.scale.width / 2, this.scale.height - 100);
-    }
-  }
-
-  private tryTapKill(wx: number, wy: number) {
-    const me = this.players[this.myId];
-    if (!me?.alive) return;
-
-    let closest: string | null = null;
-    let minDist = Infinity;
-    for (const [id, player] of Object.entries(this.players)) {
-      if (id === this.myId || !player.alive) continue;
-      const d = Phaser.Math.Distance.Between(wx, wy, player.head.x, player.head.y);
-      if (d < minDist) { minDist = d; closest = id; }
-    }
-    if (closest && minDist < GAME_CONFIG.tapRadius + me.size) {
-      this.socket?.send(JSON.stringify({ type: 'tap', target: closest }));
     }
   }
 

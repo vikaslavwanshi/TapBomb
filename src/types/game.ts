@@ -14,11 +14,20 @@ export interface PlayerState {
   name: string;
   color: number;
   head: Vec2;
+  angle: number;      // heading in radians — dragons always run forward along this
   segments: BodySegment[];
   size: number;       // base radius of head, grows on kill
   speed: number;
   alive: boolean;
   kills: number;
+}
+
+export interface Fireball {
+  id: string;
+  ownerId: PlayerId;
+  x: number;
+  y: number;
+  angle: number; // travel direction, fixed at launch
 }
 
 export interface Orb {
@@ -38,19 +47,22 @@ export interface ChatMessage {
 // Messages sent client → server
 export type ClientMessage =
   | { type: 'join';   name: string }
-  | { type: 'move';   direction: Vec2 }
-  | { type: 'tap';    target: PlayerId }
+  | { type: 'move';   direction: Vec2 } // desired heading; zero vector = keep current heading
+  | { type: 'fire' }
   | { type: 'chat';   text: string }
   | { type: 'respawn' };
 
 // Messages sent server → client
 export type ServerMessage =
-  | { type: 'state';     players: Record<PlayerId, PlayerState> }
-  | { type: 'killed';    killer: PlayerId; victim: PlayerId }
-  | { type: 'explode';   victim: PlayerId; at: Vec2 }
-  | { type: 'chat';      msg: ChatMessage }
-  | { type: 'welcome';   id: PlayerId; players: Record<PlayerId, PlayerState>; orbs: Record<string, Orb> }
-  | { type: 'orb_eaten'; orbId: string; newOrb: Orb; eaterId: PlayerId };
+  | { type: 'state';      players: Record<PlayerId, PlayerState>; fireballs: Record<string, Fireball> }
+  | { type: 'killed';     killer: PlayerId; victim: PlayerId }
+  | { type: 'explode';    victim: PlayerId; at: Vec2 }
+  | { type: 'fireball';   fireball: Fireball }
+  | { type: 'cut';        victim: PlayerId; attacker: PlayerId; at: Vec2; segmentsLost: number }
+  | { type: 'orbs_added'; orbs: Orb[] }
+  | { type: 'chat';       msg: ChatMessage }
+  | { type: 'welcome';    id: PlayerId; players: Record<PlayerId, PlayerState>; orbs: Record<string, Orb> }
+  | { type: 'orb_eaten';  orbId: string; newOrb: Orb; eaterId: PlayerId };
 
 export const DRAGON_COLORS = [
   0xe74c3c, // red
@@ -72,8 +84,13 @@ export const GAME_CONFIG = {
   segmentSpacing: 18,
   segmentsOnKill: 6,
   initialSegments: 12,
-  tapRadius: 80,
   speed: 160,
+  turnRate: 3.4,          // rad/s — max steering rate while auto-running
+  fireballSpeed: 520,     // px/s
+  fireballRadius: 11,     // px — collision radius of the projectile
+  fireballLifeMs: 1600,   // despawn after this long without hitting anything
+  fireCooldownMs: 650,    // min delay between shots per player
+  cutOrbEvery: 2,         // severed segments drop a food orb every N segments
   orbCount: 220,
   orbEatRadius: 24,           // px — how close head must be to eat an orb
   orbSizeGain: [1.5, 3, 6],   // size added per orb value 1/2/3

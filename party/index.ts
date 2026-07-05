@@ -8,8 +8,8 @@ import type {
   PlayerState,
   ClientMessage,
   ServerMessage,
-  Vec2,
   Orb,
+  Fireball,
 } from '../src/types/game';
 import { GAME_CONFIG, DRAGON_COLORS } from '../src/types/game';
 import {
@@ -18,9 +18,13 @@ import {
   randomPos,
   buildInitialSegments,
   spawnPlayer,
-  clampToWorld,
+  stepPlayer,
+  stepFireball,
+  fireballOutOfWorld,
+  fireballHitPlayer,
+  cutSegments,
+  orbsFromSegments,
   distance,
-  updateSegments,
 } from './gameLogic';
 
 const TICK_MS = 50; // 20 Hz
@@ -30,7 +34,11 @@ const TICK_MS = 50; // 20 Hz
 export class TapBombServer extends Server {
   players: Record<string, PlayerState> = {};
   orbs: Record<string, Orb> = makeOrbs();
-  directions: Record<string, Vec2> = {};
+  fireballs: Record<string, Fireball> = {};
+  fireballExpiry: Record<string, number> = {};
+  desiredAngles: Record<string, number> = {};
+  lastFireAt: Record<string, number> = {};
+  fireballCounter = 0;
   tickInterval: ReturnType<typeof setInterval> | null = null;
 
   onConnect() {
@@ -41,8 +49,9 @@ export class TapBombServer extends Server {
 
   onClose(conn: Connection) {
     delete this.players[conn.id];
-    delete this.directions[conn.id];
-    this.broadcastMsg({ type: 'state', players: this.players });
+    delete this.desiredAngles[conn.id];
+    delete this.lastFireAt[conn.id];
+    this.broadcastMsg({ type: 'state', players: this.players, fireballs: this.fireballs });
 
     let remaining = 0;
     for (const _ of this.getConnections()) remaining++;
@@ -66,7 +75,7 @@ export class TapBombServer extends Server {
       const colorIndex = Object.keys(this.players).length % DRAGON_COLORS.length;
       const player = spawnPlayer(sender.id, msg.name, DRAGON_COLORS[colorIndex]);
       this.players[sender.id] = player;
-      this.directions[sender.id] = { x: 0, y: 0 };
+      this.desiredAngles[sender.id] = player.angle;
 
       const welcome: ServerMessage = {
         type: 'welcome',
@@ -75,7 +84,7 @@ export class TapBombServer extends Server {
         orbs: this.orbs,
       };
       sender.send(JSON.stringify(welcome));
-      this.broadcastMsg({ type: 'state', players: this.players }, sender.id);
+      this.broadcastMsg({ type: 'state', players: this.players, fireballs: this.fireballs }, sender.id);
       return;
     }
 
@@ -83,36 +92,39 @@ export class TapBombServer extends Server {
     if (!player) return;
 
     if (msg.type === 'move') {
-      // Just update direction; movement applied in tick()
-      this.directions[sender.id] = msg.direction;
+      // Zero vector means "keep current heading" — dragons never stop running
+      const { x, y } = msg.direction;
+      if (x !== 0 || y !== 0) {
+        this.desiredAngles[sender.id] = Math.atan2(y, x);
+      }
     }
 
-    if (msg.type === 'tap') {
-      const target = this.players[msg.target];
-      if (!target || !target.alive || !player.alive || msg.target === sender.id) return;
+    if (msg.type === 'fire') {
+      if (!player.alive) return;
+      const now = Date.now();
+      if (now - (this.lastFireAt[sender.id] ?? 0) < GAME_CONFIG.fireCooldownMs) return;
+      this.lastFireAt[sender.id] = now;
 
-      const dist = distance(player.head, target.head);
-      if (dist > GAME_CONFIG.tapRadius + player.size) return;
-
-      target.alive = false;
-      player.kills += 1;
-      player.size = Math.min(player.size + GAME_CONFIG.sizeOnKill, GAME_CONFIG.maxSize);
-
-      const lastSeg = player.segments[player.segments.length - 1] ?? player.head;
-      for (let i = 0; i < GAME_CONFIG.segmentsOnKill; i++) {
-        player.segments.push({ ...lastSeg, angle: 0 });
-      }
-
-      this.broadcastMsg({ type: 'explode', victim: target.id, at: { ...target.head } });
-      this.broadcastMsg({ type: 'killed', killer: player.id, victim: target.id });
+      const muzzle = player.size + GAME_CONFIG.fireballRadius + 4;
+      const fb: Fireball = {
+        id: `f${++this.fireballCounter}`,
+        ownerId: sender.id,
+        x: player.head.x + Math.cos(player.angle) * muzzle,
+        y: player.head.y + Math.sin(player.angle) * muzzle,
+        angle: player.angle,
+      };
+      this.fireballs[fb.id] = fb;
+      this.fireballExpiry[fb.id] = now + GAME_CONFIG.fireballLifeMs;
+      this.broadcastMsg({ type: 'fireball', fireball: fb });
     }
 
     if (msg.type === 'respawn') {
       player.alive = true;
       player.head = randomPos();
+      player.angle = Math.random() * Math.PI * 2;
       player.segments = buildInitialSegments(player.head);
       player.size = GAME_CONFIG.initialSize;
-      this.directions[sender.id] = { x: 0, y: 0 };
+      this.desiredAngles[sender.id] = player.angle;
     }
 
     if (msg.type === 'chat') {
@@ -130,18 +142,13 @@ export class TapBombServer extends Server {
 
   tick() {
     const dt = TICK_MS / 1000;
+    const now = Date.now();
 
     for (const [id, player] of Object.entries(this.players)) {
       if (!player.alive) continue;
-      const dir = this.directions[id] ?? { x: 0, y: 0 };
 
-      if (dir.x !== 0 || dir.y !== 0) {
-        player.head = clampToWorld({
-          x: player.head.x + dir.x * GAME_CONFIG.speed * dt,
-          y: player.head.y + dir.y * GAME_CONFIG.speed * dt,
-        });
-        updateSegments(player);
-      }
+      // Dragons always run; input only steers
+      stepPlayer(player, this.desiredAngles[id] ?? player.angle, dt);
 
       // Orb collision
       const eatR = GAME_CONFIG.orbEatRadius + player.size * 0.3;
@@ -166,7 +173,58 @@ export class TapBombServer extends Server {
       }
     }
 
-    this.broadcastMsg({ type: 'state', players: this.players });
+    // Fireballs: fly, expire, and resolve hits
+    for (const fb of Object.values(this.fireballs)) {
+      stepFireball(fb, dt);
+
+      if (now > (this.fireballExpiry[fb.id] ?? 0) || fireballOutOfWorld(fb)) {
+        this.removeFireball(fb.id);
+        continue;
+      }
+
+      for (const victim of Object.values(this.players)) {
+        const hit = fireballHitPlayer(fb, victim);
+        if (!hit) continue;
+
+        const shooter = this.players[fb.ownerId];
+
+        if (hit.kind === 'head') {
+          victim.alive = false;
+          if (shooter?.alive) {
+            shooter.kills += 1;
+            shooter.size = Math.min(shooter.size + GAME_CONFIG.sizeOnKill, GAME_CONFIG.maxSize);
+            const lastSeg = shooter.segments[shooter.segments.length - 1] ?? shooter.head;
+            for (let i = 0; i < GAME_CONFIG.segmentsOnKill; i++) {
+              shooter.segments.push({ ...lastSeg, angle: 0 });
+            }
+          }
+          this.broadcastMsg({ type: 'explode', victim: victim.id, at: { ...victim.head } });
+          this.broadcastMsg({ type: 'killed', killer: fb.ownerId, victim: victim.id });
+        } else {
+          const removed = cutSegments(victim, hit.segmentIndex);
+          const dropped = orbsFromSegments(removed);
+          for (const orb of dropped) this.orbs[orb.id] = orb;
+          this.broadcastMsg({
+            type: 'cut',
+            victim: victim.id,
+            attacker: fb.ownerId,
+            at: { x: fb.x, y: fb.y },
+            segmentsLost: removed.length,
+          });
+          if (dropped.length > 0) this.broadcastMsg({ type: 'orbs_added', orbs: dropped });
+        }
+
+        this.removeFireball(fb.id);
+        break; // fireball is spent on first hit
+      }
+    }
+
+    this.broadcastMsg({ type: 'state', players: this.players, fireballs: this.fireballs });
+  }
+
+  removeFireball(id: string) {
+    delete this.fireballs[id];
+    delete this.fireballExpiry[id];
   }
 
   broadcastMsg(msg: ServerMessage, excludeId?: string) {

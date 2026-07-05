@@ -17,7 +17,7 @@ export default function LobbyScreen({ onJoin }: Props) {
     <div style={styles.overlay}>
       <div style={styles.card}>
         <h1 style={styles.title}>🐉 TapBomb</h1>
-        <p style={styles.subtitle}>Tap to explode. Grow bigger. Dominate.</p>
+        <p style={styles.subtitle}>Steer your dragon. SPACE to breathe fire. Sever tails, explode heads.</p>
         <form onSubmit={handleSubmit} style={styles.form}>
           <input
             style={styles.input}
