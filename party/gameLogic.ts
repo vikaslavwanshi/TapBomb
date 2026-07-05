@@ -1,32 +1,153 @@
 // Pure game-logic helpers shared by the game server and unit tests.
-import type { PlayerState, Vec2, BodySegment, Orb, Fireball } from '../src/types/game';
+import type {
+  PlayerState,
+  Vec2,
+  BodySegment,
+  Orb,
+  Fireball,
+  Terrain,
+  TerrainFeature,
+  TerrainKind,
+} from '../src/types/game';
 import { GAME_CONFIG } from '../src/types/game';
 
-let orbIdCounter = 0;
-export const randomOrb = (): Orb => {
-  const roll = Math.random();
-  const value: 1 | 2 | 3 = roll < 0.65 ? 1 : roll < 0.9 ? 2 : 3;
-  return {
-    id: `o${++orbIdCounter}`,
-    x: 50 + Math.random() * (GAME_CONFIG.worldWidth - 100),
-    y: 50 + Math.random() * (GAME_CONFIG.worldHeight - 100),
-    value,
+// ── Terrain ───────────────────────────────────────────────────────────────────
+
+const between = ([lo, hi]: [number, number]) => lo + Math.random() * (hi - lo);
+
+// Which feature kinds stop what. Trees are canopy: dragons fly over, fireballs don't.
+const MOVEMENT_BLOCKERS: TerrainKind[] = ['mountain', 'rock'];
+const FIREBALL_BLOCKERS: TerrainKind[] = ['mountain', 'rock', 'tree'];
+
+export const makeTerrain = (): Terrain => {
+  const { worldWidth: W, worldHeight: H } = GAME_CONFIG;
+
+  const zones: Terrain['zones'] = [
+    {
+      kind: 'sea',
+      x: W * (0.15 + Math.random() * 0.7),
+      y: H * (0.15 + Math.random() * 0.7),
+      rx: 320 + Math.random() * 200,
+      ry: 220 + Math.random() * 160,
+    },
+    {
+      kind: 'desert',
+      x: W * (0.15 + Math.random() * 0.7),
+      y: H * (0.15 + Math.random() * 0.7),
+      rx: 360 + Math.random() * 220,
+      ry: 260 + Math.random() * 180,
+    },
+  ];
+
+  const features: TerrainFeature[] = [];
+  let featureId = 0;
+  const place = (kind: TerrainKind, count: number, radiusRange: [number, number]) => {
+    for (let i = 0; i < count; i++) {
+      for (let attempt = 0; attempt < 40; attempt++) {
+        const radius = between(radiusRange);
+        const x = radius + 80 + Math.random() * (W - 2 * (radius + 80));
+        const y = radius + 80 + Math.random() * (H - 2 * (radius + 80));
+        const crowded = features.some(
+          (f) => distance({ x, y }, f) < f.radius + radius + 70,
+        );
+        if (!crowded) {
+          features.push({ id: `t${++featureId}`, kind, x, y, radius });
+          break;
+        }
+      }
+    }
   };
+  place('mountain', GAME_CONFIG.mountainCount, GAME_CONFIG.mountainRadius);
+  place('rock', GAME_CONFIG.rockCount, GAME_CONFIG.rockRadius);
+  place('tree', GAME_CONFIG.treeCount, GAME_CONFIG.treeRadius);
+
+  return { features, zones };
 };
 
-export const makeOrbs = (): Record<string, Orb> => {
+export const blockingFeature = (
+  pos: Vec2,
+  clearance: number,
+  features: TerrainFeature[],
+  kinds: TerrainKind[],
+): TerrainFeature | null => {
+  for (const f of features) {
+    if (!kinds.includes(f.kind)) continue;
+    if (distance(pos, f) < f.radius + clearance) return f;
+  }
+  return null;
+};
+
+// Push a position out of any movement-blocking feature it overlaps.
+export const pushOutOfFeatures = (
+  pos: Vec2,
+  clearance: number,
+  features: TerrainFeature[],
+): Vec2 => {
+  let out = pos;
+  for (let i = 0; i < 3; i++) {
+    const f = blockingFeature(out, clearance, features, MOVEMENT_BLOCKERS);
+    if (!f) break;
+    const dx = out.x - f.x;
+    const dy = out.y - f.y;
+    const d = Math.sqrt(dx * dx + dy * dy) || 1;
+    const target = f.radius + clearance + 0.5;
+    out = { x: f.x + (dx / d) * target, y: f.y + (dy / d) * target };
+  }
+  return clampToWorld(out);
+};
+
+export const zoneSpeedFactor = (pos: Vec2, zones: Terrain['zones']): number => {
+  for (const z of zones) {
+    const nx = (pos.x - z.x) / z.rx;
+    const ny = (pos.y - z.y) / z.ry;
+    if (nx * nx + ny * ny < 1) {
+      return z.kind === 'sea' ? GAME_CONFIG.seaSlow : GAME_CONFIG.desertSlow;
+    }
+  }
+  return 1;
+};
+
+export const fireballBlockedByTerrain = (fb: Fireball, features: TerrainFeature[]): boolean =>
+  blockingFeature({ x: fb.x, y: fb.y }, GAME_CONFIG.fireballRadius, features, FIREBALL_BLOCKERS) !== null;
+
+export const fireballsCollide = (a: Fireball, b: Fireball): boolean =>
+  distance(a, b) < GAME_CONFIG.fireballRadius * 2;
+
+// ── Orbs and spawning ─────────────────────────────────────────────────────────
+
+let orbIdCounter = 0;
+export const randomOrb = (terrain?: Terrain): Orb => {
+  const roll = Math.random();
+  const value: 1 | 2 | 3 = roll < 0.65 ? 1 : roll < 0.9 ? 2 : 3;
+  let x = 0;
+  let y = 0;
+  for (let attempt = 0; attempt < 40; attempt++) {
+    x = 50 + Math.random() * (GAME_CONFIG.worldWidth - 100);
+    y = 50 + Math.random() * (GAME_CONFIG.worldHeight - 100);
+    if (!terrain || !blockingFeature({ x, y }, 10, terrain.features, MOVEMENT_BLOCKERS)) break;
+  }
+  return { id: `o${++orbIdCounter}`, x, y, value };
+};
+
+export const makeOrbs = (terrain?: Terrain): Record<string, Orb> => {
   const orbs: Record<string, Orb> = {};
   for (let i = 0; i < GAME_CONFIG.orbCount; i++) {
-    const orb = randomOrb();
+    const orb = randomOrb(terrain);
     orbs[orb.id] = orb;
   }
   return orbs;
 };
 
-export const randomPos = (): Vec2 => ({
-  x: 200 + Math.random() * (GAME_CONFIG.worldWidth - 400),
-  y: 200 + Math.random() * (GAME_CONFIG.worldHeight - 400),
-});
+export const randomPos = (terrain?: Terrain): Vec2 => {
+  for (let attempt = 0; attempt < 60; attempt++) {
+    const pos = {
+      x: 200 + Math.random() * (GAME_CONFIG.worldWidth - 400),
+      y: 200 + Math.random() * (GAME_CONFIG.worldHeight - 400),
+    };
+    if (!terrain || !blockingFeature(pos, 60, terrain.features, MOVEMENT_BLOCKERS)) return pos;
+  }
+  return { x: GAME_CONFIG.worldWidth / 2, y: GAME_CONFIG.worldHeight / 2 };
+};
 
 export const buildInitialSegments = (head: Vec2): BodySegment[] =>
   Array.from({ length: GAME_CONFIG.initialSegments }, (_, i) => ({
@@ -35,8 +156,13 @@ export const buildInitialSegments = (head: Vec2): BodySegment[] =>
     angle: -Math.PI / 2,
   }));
 
-export const spawnPlayer = (id: string, name: string, color: number): PlayerState => {
-  const head = randomPos();
+export const spawnPlayer = (
+  id: string,
+  name: string,
+  color: number,
+  terrain?: Terrain,
+): PlayerState => {
+  const head = randomPos(terrain);
   return {
     id,
     name,
@@ -73,12 +199,21 @@ export const turnToward = (current: number, desired: number, maxDelta: number): 
 };
 
 // Advance a dragon one tick: steer toward desiredAngle, then run forward.
-export const stepPlayer = (player: PlayerState, desiredAngle: number, dt: number): void => {
+// Zones (sea/desert) slow the run; mountains and rocks are impassable.
+export const stepPlayer = (
+  player: PlayerState,
+  desiredAngle: number,
+  dt: number,
+  terrain?: Terrain,
+): void => {
   player.angle = turnToward(player.angle, desiredAngle, GAME_CONFIG.turnRate * dt);
-  player.head = clampToWorld({
-    x: player.head.x + Math.cos(player.angle) * player.speed * dt,
-    y: player.head.y + Math.sin(player.angle) * player.speed * dt,
+  const speed = player.speed * (terrain ? zoneSpeedFactor(player.head, terrain.zones) : 1);
+  let next = clampToWorld({
+    x: player.head.x + Math.cos(player.angle) * speed * dt,
+    y: player.head.y + Math.sin(player.angle) * speed * dt,
   });
+  if (terrain) next = pushOutOfFeatures(next, player.size * 0.4, terrain.features);
+  player.head = next;
   updateSegments(player);
 };
 

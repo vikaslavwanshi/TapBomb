@@ -30,6 +30,34 @@ export interface Fireball {
   angle: number; // travel direction, fixed at launch
 }
 
+// ── Terrain ───────────────────────────────────────────────────────────────────
+// Features are circular obstacles. Mountains and rocks block dragons AND
+// fireballs; trees only block fireballs (dragons fly over the canopy), which
+// makes forests defensive cover.
+export type TerrainKind = 'mountain' | 'rock' | 'tree';
+export interface TerrainFeature {
+  id: string;
+  kind: TerrainKind;
+  x: number;
+  y: number;
+  radius: number;
+}
+
+// Zones are elliptical regions that slow dragons crossing them.
+export type ZoneKind = 'desert' | 'sea';
+export interface TerrainZone {
+  kind: ZoneKind;
+  x: number;
+  y: number;
+  rx: number;
+  ry: number;
+}
+
+export interface Terrain {
+  features: TerrainFeature[];
+  zones: TerrainZone[];
+}
+
 export interface Orb {
   id: string;
   x: number;
@@ -58,10 +86,11 @@ export type ServerMessage =
   | { type: 'killed';     killer: PlayerId; victim: PlayerId }
   | { type: 'explode';    victim: PlayerId; at: Vec2 }
   | { type: 'fireball';   fireball: Fireball }
+  | { type: 'fireball_hit'; at: Vec2 } // fizzled on terrain or another fireball
   | { type: 'cut';        victim: PlayerId; attacker: PlayerId; at: Vec2; segmentsLost: number }
   | { type: 'orbs_added'; orbs: Orb[] }
   | { type: 'chat';       msg: ChatMessage }
-  | { type: 'welcome';    id: PlayerId; players: Record<PlayerId, PlayerState>; orbs: Record<string, Orb> }
+  | { type: 'welcome';    id: PlayerId; players: Record<PlayerId, PlayerState>; orbs: Record<string, Orb>; terrain: Terrain }
   | { type: 'orb_eaten';  orbId: string; newOrb: Orb; eaterId: PlayerId };
 
 export const DRAGON_COLORS = [
@@ -91,6 +120,15 @@ export const GAME_CONFIG = {
   fireballLifeMs: 1600,   // despawn after this long without hitting anything
   fireCooldownMs: 650,    // min delay between shots per player
   cutOrbEvery: 2,         // severed segments drop a food orb every N segments
+  // Terrain generation
+  mountainCount: 7,
+  mountainRadius: [90, 160] as [number, number],
+  rockCount: 16,
+  rockRadius: [18, 36] as [number, number],
+  treeCount: 26,
+  treeRadius: [20, 30] as [number, number],
+  desertSlow: 0.72,       // speed multiplier while crossing desert
+  seaSlow: 0.55,          // speed multiplier while crossing sea
   orbCount: 220,
   orbEatRadius: 24,           // px — how close head must be to eat an orb
   orbSizeGain: [1.5, 3, 6],   // size added per orb value 1/2/3

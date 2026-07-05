@@ -1,11 +1,12 @@
 import { useEffect, useRef } from 'react';
-import type { PlayerState, Orb } from '@/types/game';
+import type { PlayerState, Orb, Terrain } from '@/types/game';
 import { GAME_CONFIG } from '@/types/game';
 
 interface Props {
   players: Record<string, PlayerState>;
   orbs: Record<string, Orb>;
   myId: string;
+  terrain?: Terrain | null;
 }
 
 const MAP_W = 160;
@@ -13,7 +14,7 @@ const MAP_H = 160;
 const SCALE_X = MAP_W / GAME_CONFIG.worldWidth;
 const SCALE_Y = MAP_H / GAME_CONFIG.worldHeight;
 
-export default function Minimap({ players, orbs, myId }: Props) {
+export default function Minimap({ players, orbs, myId, terrain }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -40,6 +41,40 @@ export default function Minimap({ players, orbs, myId }: Props) {
     }
     for (let y = 0; y < MAP_H; y += MAP_H / 6) {
       ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(MAP_W, y); ctx.stroke();
+    }
+
+    // Terrain — zones as tinted patches, features as tiny markers
+    if (terrain) {
+      for (const z of terrain.zones) {
+        ctx.fillStyle = z.kind === 'sea' ? 'rgba(42,106,165,0.45)' : 'rgba(194,163,93,0.35)';
+        ctx.beginPath();
+        ctx.ellipse(z.x * SCALE_X, z.y * SCALE_Y, z.rx * SCALE_X, z.ry * SCALE_Y, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      for (const f of terrain.features) {
+        const fx = f.x * SCALE_X;
+        const fy = f.y * SCALE_Y;
+        if (f.kind === 'mountain') {
+          ctx.fillStyle = 'rgba(140,155,175,0.9)';
+          const r = Math.max(2.5, f.radius * SCALE_X);
+          ctx.beginPath();
+          ctx.moveTo(fx - r, fy + r * 0.7);
+          ctx.lineTo(fx, fy - r);
+          ctx.lineTo(fx + r, fy + r * 0.7);
+          ctx.closePath();
+          ctx.fill();
+        } else if (f.kind === 'rock') {
+          ctx.fillStyle = 'rgba(120,130,145,0.8)';
+          ctx.beginPath();
+          ctx.arc(fx, fy, 1.4, 0, Math.PI * 2);
+          ctx.fill();
+        } else {
+          ctx.fillStyle = 'rgba(70,150,90,0.8)';
+          ctx.beginPath();
+          ctx.arc(fx, fy, 1.2, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
     }
 
     // Orbs (tiny dots, batched by value)

@@ -15,8 +15,14 @@ import {
   fireballHitPlayer,
   cutSegments,
   orbsFromSegments,
+  makeTerrain,
+  blockingFeature,
+  pushOutOfFeatures,
+  zoneSpeedFactor,
+  fireballBlockedByTerrain,
+  fireballsCollide,
 } from './gameLogic';
-import type { Fireball } from '../src/types/game';
+import type { Fireball, Terrain } from '../src/types/game';
 import { GAME_CONFIG } from '../src/types/game';
 
 describe('distance', () => {
@@ -263,6 +269,96 @@ describe('orbsFromSegments', () => {
 
   it('returns no orbs for an empty cut', () => {
     expect(orbsFromSegments([])).toHaveLength(0);
+  });
+});
+
+describe('terrain', () => {
+  const fixedTerrain: Terrain = {
+    features: [
+      { id: 't1', kind: 'mountain', x: 1000, y: 1000, radius: 120 },
+      { id: 't2', kind: 'rock', x: 2000, y: 2000, radius: 30 },
+      { id: 't3', kind: 'tree', x: 500, y: 500, radius: 25 },
+    ],
+    zones: [
+      { kind: 'sea', x: 2500, y: 500, rx: 400, ry: 300 },
+      { kind: 'desert', x: 500, y: 2500, rx: 450, ry: 350 },
+    ],
+  };
+
+  it('makeTerrain generates the configured feature counts inside the world', () => {
+    const t = makeTerrain();
+    const mountains = t.features.filter((f) => f.kind === 'mountain');
+    const rocks = t.features.filter((f) => f.kind === 'rock');
+    const trees = t.features.filter((f) => f.kind === 'tree');
+    expect(mountains.length).toBeGreaterThan(0);
+    expect(mountains.length).toBeLessThanOrEqual(GAME_CONFIG.mountainCount);
+    expect(rocks.length).toBeLessThanOrEqual(GAME_CONFIG.rockCount);
+    expect(trees.length).toBeLessThanOrEqual(GAME_CONFIG.treeCount);
+    for (const f of t.features) {
+      expect(f.x - f.radius).toBeGreaterThanOrEqual(0);
+      expect(f.x + f.radius).toBeLessThanOrEqual(GAME_CONFIG.worldWidth);
+      expect(f.y - f.radius).toBeGreaterThanOrEqual(0);
+      expect(f.y + f.radius).toBeLessThanOrEqual(GAME_CONFIG.worldHeight);
+    }
+    expect(t.zones).toHaveLength(2);
+  });
+
+  it('blockingFeature respects the kinds filter (trees do not block movement)', () => {
+    const onTree = { x: 500, y: 500 };
+    expect(blockingFeature(onTree, 5, fixedTerrain.features, ['mountain', 'rock'])).toBeNull();
+    expect(blockingFeature(onTree, 5, fixedTerrain.features, ['tree'])?.id).toBe('t3');
+  });
+
+  it('pushOutOfFeatures ejects a position from inside a mountain', () => {
+    const inside = { x: 1010, y: 1000 };
+    const out = pushOutOfFeatures(inside, 10, fixedTerrain.features);
+    const d = distance(out, { x: 1000, y: 1000 });
+    expect(d).toBeGreaterThanOrEqual(130); // radius + clearance
+  });
+
+  it('pushOutOfFeatures leaves clear positions unchanged', () => {
+    const clear = { x: 1500, y: 1500 };
+    expect(pushOutOfFeatures(clear, 10, fixedTerrain.features)).toEqual(clear);
+  });
+
+  it('zoneSpeedFactor slows dragons in sea and desert', () => {
+    expect(zoneSpeedFactor({ x: 2500, y: 500 }, fixedTerrain.zones)).toBe(GAME_CONFIG.seaSlow);
+    expect(zoneSpeedFactor({ x: 500, y: 2500 }, fixedTerrain.zones)).toBe(GAME_CONFIG.desertSlow);
+    expect(zoneSpeedFactor({ x: 1500, y: 1500 }, fixedTerrain.zones)).toBe(1);
+  });
+
+  it('stepPlayer cannot enter a mountain', () => {
+    const player = spawnPlayer('p1', 'Dragon', 0);
+    player.head = { x: 850, y: 1000 }; // just west of the mountain
+    player.angle = 0; // running straight at it
+    for (let i = 0; i < 100; i++) stepPlayer(player, 0, 0.05, fixedTerrain);
+    const d = distance(player.head, { x: 1000, y: 1000 });
+    expect(d).toBeGreaterThanOrEqual(120); // never inside the rock face
+  });
+
+  it('fireballBlockedByTerrain stops shots on mountains, rocks AND trees', () => {
+    const at = (x: number, y: number): Fireball => ({ id: 'f', ownerId: 'o', x, y, angle: 0 });
+    expect(fireballBlockedByTerrain(at(1000, 1000), fixedTerrain.features)).toBe(true);
+    expect(fireballBlockedByTerrain(at(2000, 2000), fixedTerrain.features)).toBe(true);
+    expect(fireballBlockedByTerrain(at(500, 500), fixedTerrain.features)).toBe(true);
+    expect(fireballBlockedByTerrain(at(1500, 1500), fixedTerrain.features)).toBe(false);
+  });
+
+  it('fireballsCollide detects near passes', () => {
+    const a: Fireball = { id: 'a', ownerId: 'p1', x: 100, y: 100, angle: 0 };
+    const b: Fireball = { id: 'b', ownerId: 'p2', x: 100 + GAME_CONFIG.fireballRadius, y: 100, angle: Math.PI };
+    const far: Fireball = { id: 'c', ownerId: 'p2', x: 200, y: 200, angle: 0 };
+    expect(fireballsCollide(a, b)).toBe(true);
+    expect(fireballsCollide(a, far)).toBe(false);
+  });
+
+  it('randomPos and randomOrb avoid mountains and rocks', () => {
+    for (let i = 0; i < 100; i++) {
+      const pos = randomPos(fixedTerrain);
+      expect(blockingFeature(pos, 50, fixedTerrain.features, ['mountain', 'rock'])).toBeNull();
+      const orb = randomOrb(fixedTerrain);
+      expect(blockingFeature(orb, 5, fixedTerrain.features, ['mountain', 'rock'])).toBeNull();
+    }
   });
 });
 

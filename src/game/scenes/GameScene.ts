@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import type { PlayerState, ServerMessage, Orb, Fireball } from '@/types/game';
+import type { PlayerState, ServerMessage, Orb, Fireball, Terrain } from '@/types/game';
 import { GAME_CONFIG } from '@/types/game';
 import { gameStore } from '@/game/gameStore';
 import {
@@ -15,6 +15,8 @@ import {
 interface DragonSprites {
   head: Phaser.GameObjects.Image;
   body: Phaser.GameObjects.Image[];
+  wings: [Phaser.GameObjects.Image, Phaser.GameObjects.Image];
+  legs: Phaser.GameObjects.Image[];
   nameTag: Phaser.GameObjects.Text;
   killBadge: Phaser.GameObjects.Text;
   glow: Phaser.GameObjects.Arc;
@@ -25,6 +27,9 @@ const SEND_RATE_MS = 50; // send direction to server at 20hz, not 60fps
 export class GameScene extends Phaser.Scene {
   private players: Record<string, PlayerState> = {};
   private orbs: Record<string, Orb> = {};
+  private terrain: Terrain | null = null;
+  private terrainGraphics!: Phaser.GameObjects.Graphics;
+  private mouthTimers: Record<string, Phaser.Time.TimerEvent> = {};
   private fireballs: Record<string, Fireball> = {};
   private fireballSprites: Record<string, Phaser.GameObjects.Image> = {};
   private orbGraphics!: Phaser.GameObjects.Graphics;
@@ -65,6 +70,9 @@ export class GameScene extends Phaser.Scene {
     const border = this.add.graphics();
     border.lineStyle(4, 0x00ffff, 0.8);
     border.strokeRect(0, 0, GAME_CONFIG.worldWidth, GAME_CONFIG.worldHeight);
+
+    // Terrain layer (drawn once when the welcome message arrives)
+    this.terrainGraphics = this.add.graphics().setDepth(1);
 
     // Orb graphics layer (redrawn only when orbs change)
     this.orbGraphics = this.add.graphics().setDepth(2);
@@ -199,6 +207,8 @@ export class GameScene extends Phaser.Scene {
       this.players = msg.players;
       this.orbs = msg.orbs;
       this.orbsDirty = true;
+      this.terrain = msg.terrain;
+      this.drawTerrain();
     }
     if (msg.type === 'state') {
       this.players = msg.players;
@@ -216,6 +226,10 @@ export class GameScene extends Phaser.Scene {
     }
     if (msg.type === 'fireball') {
       playFireball(msg.fireball.ownerId === this.myId ? 1 : 0.5);
+      this.roar(msg.fireball.ownerId);
+    }
+    if (msg.type === 'fireball_hit') {
+      this.playFizzle(msg.at.x, msg.at.y);
     }
     if (msg.type === 'cut') {
       this.playCutEffect(msg.at.x, msg.at.y, this.players[msg.victim]?.color ?? 0xff8800);
@@ -280,6 +294,20 @@ export class GameScene extends Phaser.Scene {
       this.add.image(seg.x, seg.y, 'dragon_body').setTint(tint).setDepth(5)
     );
 
+    // Wings — anchored at the shoulder (first segment), flapping in update
+    const wings: [Phaser.GameObjects.Image, Phaser.GameObjects.Image] = [
+      this.add.image(player.head.x, player.head.y, 'dragon_wing')
+        .setTint(tint).setDepth(4).setOrigin(0.08, 0.55),
+      this.add.image(player.head.x, player.head.y, 'dragon_wing')
+        .setTint(tint).setDepth(4).setOrigin(0.08, 0.55).setFlipY(true),
+    ];
+
+    // Two pairs of legs along the body
+    const legs = [0, 1, 2, 3].map(() =>
+      this.add.image(player.head.x, player.head.y, 'dragon_leg')
+        .setTint(tint).setDepth(4).setOrigin(0.5, 0.15).setVisible(false)
+    );
+
     const nameTag = this.add.text(player.head.x, player.head.y - player.size - 14, player.name, {
       fontSize: '13px',
       color: isMe ? '#00ffff' : '#ffffff',
@@ -307,7 +335,7 @@ export class GameScene extends Phaser.Scene {
       });
     }
 
-    this.sprites[id] = { head, body, nameTag, killBadge, glow };
+    this.sprites[id] = { head, body, wings, legs, nameTag, killBadge, glow };
   }
 
   private updateSprite(id: string, player: PlayerState) {
@@ -331,6 +359,46 @@ export class GameScene extends Phaser.Scene {
       sp.body[i]?.setPosition(seg.x, seg.y).setScale(Math.max(0.3, scale * (1 - i * 0.008)));
     });
 
+    // Wings flap at the shoulder — mirrored across the heading
+    const shoulder = player.segments[0] ?? { ...player.head, angle: player.angle };
+    const flap = Math.sin(this.time.now / 130) * 0.35;
+    const wingScale = scale * 0.85;
+    sp.wings[0]
+      .setPosition(shoulder.x, shoulder.y)
+      .setRotation(shoulder.angle - 1.9 - flap)
+      .setScale(wingScale);
+    sp.wings[1]
+      .setPosition(shoulder.x, shoulder.y)
+      .setRotation(shoulder.angle + 1.9 + flap)
+      .setScale(wingScale);
+
+    // Legs: two pairs at segments 1 and 3, splayed out with a walking swing
+    const legSegs = [player.segments[1], player.segments[3]];
+    legSegs.forEach((seg, pair) => {
+      const left = sp.legs[pair * 2];
+      const right = sp.legs[pair * 2 + 1];
+      if (!seg) {
+        left?.setVisible(false);
+        right?.setVisible(false);
+        return;
+      }
+      const swing = Math.sin(this.time.now / 160 + pair * 1.6) * 0.25;
+      const offset = player.size * scale * 0.45;
+      const perpX = Math.cos(seg.angle + Math.PI / 2);
+      const perpY = Math.sin(seg.angle + Math.PI / 2);
+      left
+        ?.setVisible(true)
+        .setPosition(seg.x - perpX * offset, seg.y - perpY * offset)
+        .setRotation(seg.angle - 2.3 + swing)
+        .setScale(scale * 0.75);
+      right
+        ?.setVisible(true)
+        .setPosition(seg.x + perpX * offset, seg.y + perpY * offset)
+        .setRotation(seg.angle + 2.3 - swing)
+        .setScale(scale * 0.75)
+        .setFlipX(true);
+    });
+
     sp.nameTag.setPosition(player.head.x, player.head.y - player.size * scale - 14);
     sp.killBadge
       .setPosition(player.head.x + player.size * scale, player.head.y - player.size * scale)
@@ -343,9 +411,8 @@ export class GameScene extends Phaser.Scene {
     for (const [id, fb] of Object.entries(this.fireballs)) {
       let sprite = this.fireballSprites[id];
       if (!sprite) {
-        sprite = this.add.image(fb.x, fb.y, 'glow_particle')
-          .setTint(0xff6600)
-          .setScale(1.6)
+        sprite = this.add.image(fb.x, fb.y, 'flame_particle')
+          .setScale(1.8)
           .setBlendMode(Phaser.BlendModes.ADD)
           .setDepth(15);
         this.fireballSprites[id] = sprite;
@@ -401,12 +468,143 @@ export class GameScene extends Phaser.Scene {
   private destroySprite(id: string) {
     const sp = this.sprites[id];
     if (!sp) return;
+    this.mouthTimers[id]?.remove();
+    delete this.mouthTimers[id];
     sp.glow.destroy();
     sp.head.destroy();
     sp.body.forEach((b) => b.destroy());
+    sp.wings.forEach((w) => w.destroy());
+    sp.legs.forEach((l) => l.destroy());
     sp.nameTag.destroy();
     sp.killBadge.destroy();
     delete this.sprites[id];
+  }
+
+  // ── Roar: open the jaw and blast flames from the mouth ────────────────────
+
+  private roar(playerId: string) {
+    const sp = this.sprites[playerId];
+    const player = this.players[playerId];
+    if (!sp || !player) return;
+
+    sp.head.setTexture('dragon_head_open');
+    this.mouthTimers[playerId]?.remove();
+    this.mouthTimers[playerId] = this.time.delayedCall(350, () => {
+      this.sprites[playerId]?.head.setTexture('dragon_head');
+      delete this.mouthTimers[playerId];
+    });
+
+    // Flame cone from the mouth along the heading
+    const scale = player.size / GAME_CONFIG.initialSize;
+    const mx = player.head.x + Math.cos(player.angle) * player.size * scale;
+    const my = player.head.y + Math.sin(player.angle) * player.size * scale;
+    const deg = Phaser.Math.RadToDeg(player.angle);
+    const flames = this.add.particles(mx, my, 'flame_particle', {
+      speed: { min: 180, max: 380 },
+      angle: { min: deg - 20, max: deg + 20 },
+      scale: { start: 1.2 * scale, end: 0 },
+      lifespan: 330,
+      blendMode: 'ADD',
+      emitting: false,
+    }).setDepth(14);
+    flames.explode(20);
+    this.time.delayedCall(700, () => flames.destroy());
+  }
+
+  private playFizzle(x: number, y: number) {
+    const puff = this.add.particles(x, y, 'flame_particle', {
+      speed: { min: 40, max: 140 },
+      scale: { start: 0.8, end: 0 },
+      lifespan: 280,
+      blendMode: 'ADD',
+      emitting: false,
+    }).setDepth(14);
+    puff.explode(10);
+    this.time.delayedCall(600, () => puff.destroy());
+    playExplosion(0.2);
+  }
+
+  // ── Terrain rendering ──────────────────────────────────────────────────────
+
+  private drawTerrain() {
+    const g = this.terrainGraphics;
+    g.clear();
+    if (!this.terrain) return;
+
+    // Zones first (under features)
+    for (const z of this.terrain.zones) {
+      if (z.kind === 'sea') {
+        g.fillStyle(0x1a4a7a, 0.55);
+        g.fillEllipse(z.x, z.y, z.rx * 2, z.ry * 2);
+        g.fillStyle(0x2a6aa5, 0.4);
+        g.fillEllipse(z.x, z.y, z.rx * 1.6, z.ry * 1.6);
+        // Wave strokes
+        g.lineStyle(2, 0x7fd4ff, 0.35);
+        for (let i = -2; i <= 2; i++) {
+          const wy = z.y + i * z.ry * 0.32;
+          const w = z.rx * Math.sqrt(Math.max(0.1, 1 - (i * 0.32) ** 2)) * 0.7;
+          g.beginPath();
+          g.arc(z.x - w * 0.4, wy, w * 0.25, Math.PI * 1.15, Math.PI * 1.85);
+          g.strokePath();
+          g.beginPath();
+          g.arc(z.x + w * 0.4, wy, w * 0.25, Math.PI * 1.15, Math.PI * 1.85);
+          g.strokePath();
+        }
+      } else {
+        g.fillStyle(0xc2a35d, 0.32);
+        g.fillEllipse(z.x, z.y, z.rx * 2, z.ry * 2);
+        g.fillStyle(0xd9bd7a, 0.22);
+        g.fillEllipse(z.x, z.y, z.rx * 1.5, z.ry * 1.5);
+        // Sand speckles
+        g.fillStyle(0xe8d49a, 0.5);
+        for (let i = 0; i < 40; i++) {
+          const a = Math.random() * Math.PI * 2;
+          const r = Math.sqrt(Math.random());
+          g.fillCircle(z.x + Math.cos(a) * z.rx * r * 0.9, z.y + Math.sin(a) * z.ry * r * 0.9, 2);
+        }
+      }
+    }
+
+    for (const f of this.terrain.features) {
+      if (f.kind === 'mountain') {
+        const r = f.radius;
+        // Base shadow
+        g.fillStyle(0x1c2333, 0.6);
+        g.fillEllipse(f.x, f.y + r * 0.55, r * 2.1, r * 0.7);
+        // Dark face
+        g.fillStyle(0x4a5568, 1);
+        g.fillTriangle(f.x - r, f.y + r * 0.6, f.x, f.y - r, f.x + r, f.y + r * 0.6);
+        // Lit face
+        g.fillStyle(0x718096, 1);
+        g.fillTriangle(f.x, f.y - r, f.x + r, f.y + r * 0.6, f.x + r * 0.25, f.y + r * 0.6);
+        // Snow cap
+        g.fillStyle(0xf0f4f8, 0.95);
+        g.fillTriangle(f.x - r * 0.28, f.y - r * 0.44, f.x, f.y - r, f.x + r * 0.28, f.y - r * 0.44);
+      } else if (f.kind === 'rock') {
+        const r = f.radius;
+        g.fillStyle(0x2d3748, 0.5);
+        g.fillEllipse(f.x, f.y + r * 0.4, r * 2.2, r * 0.8);
+        g.fillStyle(0x5f6b7a, 1);
+        g.fillCircle(f.x - r * 0.3, f.y, r * 0.75);
+        g.fillCircle(f.x + r * 0.35, f.y + r * 0.1, r * 0.65);
+        g.fillCircle(f.x, f.y - r * 0.3, r * 0.6);
+        g.fillStyle(0x8894a3, 0.8);
+        g.fillCircle(f.x - r * 0.25, f.y - r * 0.25, r * 0.3);
+      } else {
+        // Tree: trunk + layered canopy
+        const r = f.radius;
+        g.fillStyle(0x1c2333, 0.45);
+        g.fillEllipse(f.x, f.y + r * 0.6, r * 1.8, r * 0.6);
+        g.fillStyle(0x6b4a2a, 1);
+        g.fillRect(f.x - r * 0.12, f.y, r * 0.24, r * 0.7);
+        g.fillStyle(0x2f6b3a, 1);
+        g.fillCircle(f.x - r * 0.35, f.y - r * 0.15, r * 0.55);
+        g.fillCircle(f.x + r * 0.35, f.y - r * 0.1, r * 0.5);
+        g.fillCircle(f.x, f.y - r * 0.5, r * 0.6);
+        g.fillStyle(0x48915a, 0.9);
+        g.fillCircle(f.x - r * 0.1, f.y - r * 0.45, r * 0.35);
+      }
+    }
   }
 
   // ── Explosion ────────────────────────────────────────────────────────────

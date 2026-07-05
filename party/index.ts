@@ -10,9 +10,11 @@ import type {
   ServerMessage,
   Orb,
   Fireball,
+  Terrain,
 } from '../src/types/game';
 import { GAME_CONFIG, DRAGON_COLORS } from '../src/types/game';
 import {
+  makeTerrain,
   makeOrbs,
   randomOrb,
   randomPos,
@@ -21,6 +23,8 @@ import {
   stepPlayer,
   stepFireball,
   fireballOutOfWorld,
+  fireballBlockedByTerrain,
+  fireballsCollide,
   fireballHitPlayer,
   cutSegments,
   orbsFromSegments,
@@ -33,7 +37,8 @@ const TICK_MS = 50; // 20 Hz
 // wrangler.toml maps this to the /parties/main/:room URL the client uses.
 export class TapBombServer extends Server {
   players: Record<string, PlayerState> = {};
-  orbs: Record<string, Orb> = makeOrbs();
+  terrain: Terrain = makeTerrain();
+  orbs: Record<string, Orb> = makeOrbs(this.terrain);
   fireballs: Record<string, Fireball> = {};
   fireballExpiry: Record<string, number> = {};
   desiredAngles: Record<string, number> = {};
@@ -73,7 +78,7 @@ export class TapBombServer extends Server {
 
     if (msg.type === 'join') {
       const colorIndex = Object.keys(this.players).length % DRAGON_COLORS.length;
-      const player = spawnPlayer(sender.id, msg.name, DRAGON_COLORS[colorIndex]);
+      const player = spawnPlayer(sender.id, msg.name, DRAGON_COLORS[colorIndex], this.terrain);
       this.players[sender.id] = player;
       this.desiredAngles[sender.id] = player.angle;
 
@@ -82,6 +87,7 @@ export class TapBombServer extends Server {
         id: sender.id,
         players: this.players,
         orbs: this.orbs,
+        terrain: this.terrain,
       };
       sender.send(JSON.stringify(welcome));
       this.broadcastMsg({ type: 'state', players: this.players, fireballs: this.fireballs }, sender.id);
@@ -120,7 +126,7 @@ export class TapBombServer extends Server {
 
     if (msg.type === 'respawn') {
       player.alive = true;
-      player.head = randomPos();
+      player.head = randomPos(this.terrain);
       player.angle = Math.random() * Math.PI * 2;
       player.segments = buildInitialSegments(player.head);
       player.size = GAME_CONFIG.initialSize;
@@ -148,7 +154,7 @@ export class TapBombServer extends Server {
       if (!player.alive) continue;
 
       // Dragons always run; input only steers
-      stepPlayer(player, this.desiredAngles[id] ?? player.angle, dt);
+      stepPlayer(player, this.desiredAngles[id] ?? player.angle, dt, this.terrain);
 
       // Orb collision
       const eatR = GAME_CONFIG.orbEatRadius + player.size * 0.3;
@@ -164,7 +170,7 @@ export class TapBombServer extends Server {
           for (let i = 0; i < segGain; i++) player.segments.push({ ...last, angle: 0 });
         }
 
-        const newOrb = randomOrb();
+        const newOrb = randomOrb(this.terrain);
         delete this.orbs[orb.id];
         this.orbs[newOrb.id] = newOrb;
 
@@ -173,12 +179,32 @@ export class TapBombServer extends Server {
       }
     }
 
-    // Fireballs: fly, expire, and resolve hits
+    // Fireballs: fly, expire, fizzle on terrain, annihilate each other, and hit dragons
     for (const fb of Object.values(this.fireballs)) {
       stepFireball(fb, dt);
 
       if (now > (this.fireballExpiry[fb.id] ?? 0) || fireballOutOfWorld(fb)) {
         this.removeFireball(fb.id);
+        continue;
+      }
+
+      if (fireballBlockedByTerrain(fb, this.terrain.features)) {
+        this.broadcastMsg({ type: 'fireball_hit', at: { x: fb.x, y: fb.y } });
+        this.removeFireball(fb.id);
+        continue;
+      }
+
+      // Fireballs shoot down fireballs — a defensive counter-shot
+      const other = Object.values(this.fireballs).find(
+        (o) => o.id !== fb.id && o.ownerId !== fb.ownerId && fireballsCollide(fb, o),
+      );
+      if (other) {
+        this.broadcastMsg({
+          type: 'fireball_hit',
+          at: { x: (fb.x + other.x) / 2, y: (fb.y + other.y) / 2 },
+        });
+        this.removeFireball(fb.id);
+        this.removeFireball(other.id);
         continue;
       }
 
