@@ -1,62 +1,72 @@
-import type * as Party from 'partykit/server';
+import {
+  Server,
+  routePartykitRequest,
+  type Connection,
+  type WSMessage,
+} from 'partyserver';
 import type {
   PlayerState,
   ClientMessage,
   ServerMessage,
   Vec2,
-  BodySegment,
   Orb,
 } from '../src/types/game';
 import { GAME_CONFIG, DRAGON_COLORS } from '../src/types/game';
+import {
+  makeOrbs,
+  randomOrb,
+  randomPos,
+  buildInitialSegments,
+  spawnPlayer,
+  clampToWorld,
+  distance,
+  updateSegments,
+} from './gameLogic';
 
 const TICK_MS = 50; // 20 Hz
 
-const playerDirections: Record<string, Vec2> = {};
-
-// ── Orb state (room-level, shared across all connections in a room) ──────────
-function makeOrbs(): Record<string, Orb> {
-  const orbs: Record<string, Orb> = {};
-  for (let i = 0; i < GAME_CONFIG.orbCount; i++) {
-    const orb = randomOrb();
-    orbs[orb.id] = orb;
-  }
-  return orbs;
-}
-
-export default class TapBombServer implements Party.Server {
+// Durable Object class — one instance per game room. The `Main` binding in
+// wrangler.toml maps this to the /parties/main/:room URL the client uses.
+export class TapBombServer extends Server {
   players: Record<string, PlayerState> = {};
   orbs: Record<string, Orb> = makeOrbs();
-  connections: Map<string, Party.Connection> = new Map();
+  directions: Record<string, Vec2> = {};
   tickInterval: ReturnType<typeof setInterval> | null = null;
 
-  constructor(readonly room: Party.Room) {}
-
-  onConnect(conn: Party.Connection) {
-    this.connections.set(conn.id, conn);
+  onConnect() {
     if (!this.tickInterval) {
       this.tickInterval = setInterval(() => this.tick(), TICK_MS);
     }
   }
 
-  onClose(conn: Party.Connection) {
-    this.connections.delete(conn.id);
+  onClose(conn: Connection) {
     delete this.players[conn.id];
-    delete playerDirections[conn.id];
-    this.broadcast({ type: 'state', players: this.players });
-    if (this.connections.size === 0 && this.tickInterval) {
+    delete this.directions[conn.id];
+    this.broadcastMsg({ type: 'state', players: this.players });
+
+    let remaining = 0;
+    for (const _ of this.getConnections()) remaining++;
+    if (remaining === 0 && this.tickInterval) {
       clearInterval(this.tickInterval);
       this.tickInterval = null;
     }
   }
 
-  onMessage(raw: string, sender: Party.Connection) {
-    const msg = JSON.parse(raw) as ClientMessage;
+  onMessage(sender: Connection, raw: WSMessage) {
+    if (typeof raw !== 'string') return;
+
+    let msg: ClientMessage;
+    try {
+      msg = JSON.parse(raw) as ClientMessage;
+    } catch {
+      return; // ignore malformed messages
+    }
 
     if (msg.type === 'join') {
       const colorIndex = Object.keys(this.players).length % DRAGON_COLORS.length;
       const player = spawnPlayer(sender.id, msg.name, DRAGON_COLORS[colorIndex]);
       this.players[sender.id] = player;
-      playerDirections[sender.id] = { x: 0, y: 0 };
+      this.directions[sender.id] = { x: 0, y: 0 };
 
       const welcome: ServerMessage = {
         type: 'welcome',
@@ -65,7 +75,7 @@ export default class TapBombServer implements Party.Server {
         orbs: this.orbs,
       };
       sender.send(JSON.stringify(welcome));
-      this.broadcastExcept(sender.id, { type: 'state', players: this.players });
+      this.broadcastMsg({ type: 'state', players: this.players }, sender.id);
       return;
     }
 
@@ -74,7 +84,7 @@ export default class TapBombServer implements Party.Server {
 
     if (msg.type === 'move') {
       // Just update direction; movement applied in tick()
-      playerDirections[sender.id] = msg.direction;
+      this.directions[sender.id] = msg.direction;
     }
 
     if (msg.type === 'tap') {
@@ -93,8 +103,8 @@ export default class TapBombServer implements Party.Server {
         player.segments.push({ ...lastSeg, angle: 0 });
       }
 
-      this.broadcast({ type: 'explode', victim: target.id, at: { ...target.head } });
-      this.broadcast({ type: 'killed', killer: player.id, victim: target.id });
+      this.broadcastMsg({ type: 'explode', victim: target.id, at: { ...target.head } });
+      this.broadcastMsg({ type: 'killed', killer: player.id, victim: target.id });
     }
 
     if (msg.type === 'respawn') {
@@ -102,11 +112,11 @@ export default class TapBombServer implements Party.Server {
       player.head = randomPos();
       player.segments = buildInitialSegments(player.head);
       player.size = GAME_CONFIG.initialSize;
-      playerDirections[sender.id] = { x: 0, y: 0 };
+      this.directions[sender.id] = { x: 0, y: 0 };
     }
 
     if (msg.type === 'chat') {
-      const chatMsg: ServerMessage = {
+      this.broadcastMsg({
         type: 'chat',
         msg: {
           from: sender.id,
@@ -114,8 +124,7 @@ export default class TapBombServer implements Party.Server {
           text: msg.text.slice(0, 200),
           ts: Date.now(),
         },
-      };
-      this.broadcast(chatMsg);
+      });
     }
   }
 
@@ -124,7 +133,7 @@ export default class TapBombServer implements Party.Server {
 
     for (const [id, player] of Object.entries(this.players)) {
       if (!player.alive) continue;
-      const dir = playerDirections[id] ?? { x: 0, y: 0 };
+      const dir = this.directions[id] ?? { x: 0, y: 0 };
 
       if (dir.x !== 0 || dir.y !== 0) {
         player.head = clampToWorld({
@@ -152,97 +161,31 @@ export default class TapBombServer implements Party.Server {
         delete this.orbs[orb.id];
         this.orbs[newOrb.id] = newOrb;
 
-        this.broadcast({ type: 'orb_eaten', orbId: orb.id, newOrb, eaterId: id });
+        this.broadcastMsg({ type: 'orb_eaten', orbId: orb.id, newOrb, eaterId: id });
         break; // one orb per tick per player
       }
     }
 
-    this.broadcast({ type: 'state', players: this.players });
+    this.broadcastMsg({ type: 'state', players: this.players });
   }
 
-  broadcast(msg: ServerMessage) {
-    const payload = JSON.stringify(msg);
-    for (const conn of this.connections.values()) {
-      conn.send(payload);
+  broadcastMsg(msg: ServerMessage, excludeId?: string) {
+    this.broadcast(JSON.stringify(msg), excludeId ? [excludeId] : undefined);
+  }
+}
+
+type Env = {
+  Main: DurableObjectNamespace<TapBombServer>;
+};
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    try {
+      const response = await routePartykitRequest(request, env as never);
+      return response ?? new Response('Not found', { status: 404 });
+    } catch (err) {
+      console.error('Routing error:', err);
+      return new Response('Internal error', { status: 500 });
     }
-  }
-
-  broadcastExcept(excludeId: string, msg: ServerMessage) {
-    const payload = JSON.stringify(msg);
-    for (const [id, conn] of this.connections.entries()) {
-      if (id !== excludeId) conn.send(payload);
-    }
-  }
-}
-
-// ── helpers ──────────────────────────────────────────────────────────────────
-
-let orbIdCounter = 0;
-function randomOrb(): Orb {
-  const roll = Math.random();
-  const value: 1 | 2 | 3 = roll < 0.65 ? 1 : roll < 0.9 ? 2 : 3;
-  return {
-    id: `o${++orbIdCounter}`,
-    x: 50 + Math.random() * (GAME_CONFIG.worldWidth - 100),
-    y: 50 + Math.random() * (GAME_CONFIG.worldHeight - 100),
-    value,
-  };
-}
-
-function randomPos(): Vec2 {
-  return {
-    x: 200 + Math.random() * (GAME_CONFIG.worldWidth - 400),
-    y: 200 + Math.random() * (GAME_CONFIG.worldHeight - 400),
-  };
-}
-
-function buildInitialSegments(head: Vec2): BodySegment[] {
-  return Array.from({ length: GAME_CONFIG.initialSegments }, (_, i) => ({
-    x: head.x,
-    y: head.y + (i + 1) * GAME_CONFIG.segmentSpacing,
-    angle: -Math.PI / 2,
-  }));
-}
-
-function spawnPlayer(id: string, name: string, color: number): PlayerState {
-  const head = randomPos();
-  return {
-    id,
-    name,
-    color,
-    head,
-    segments: buildInitialSegments(head),
-    size: GAME_CONFIG.initialSize,
-    speed: GAME_CONFIG.speed,
-    alive: true,
-    kills: 0,
-  };
-}
-
-function clampToWorld(pos: Vec2): Vec2 {
-  return {
-    x: Math.max(0, Math.min(GAME_CONFIG.worldWidth, pos.x)),
-    y: Math.max(0, Math.min(GAME_CONFIG.worldHeight, pos.y)),
-  };
-}
-
-function distance(a: Vec2, b: Vec2): number {
-  return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
-}
-
-function updateSegments(player: PlayerState) {
-  const spacing = GAME_CONFIG.segmentSpacing;
-  let prev = player.head;
-  for (const seg of player.segments) {
-    const dx = seg.x - prev.x;
-    const dy = seg.y - prev.y;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    if (dist > spacing) {
-      const ratio = (dist - spacing) / dist;
-      seg.x -= dx * ratio;
-      seg.y -= dy * ratio;
-    }
-    seg.angle = Math.atan2(prev.y - seg.y, prev.x - seg.x);
-    prev = seg;
-  }
-}
+  },
+};

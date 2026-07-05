@@ -1,0 +1,13 @@
+name = "tapbomb"
+main = "party/index.ts"
+compatibility_date = "2026-01-01"
+
+# Binding name "Main" is load-bearing: partyserver kebab-cases it to route
+# /parties/main/:room, which is the URL the client connects to.
+[[durable_objects.bindings]]
+name = "Main"
+class_name = "TapBombServer"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["TapBombServer"]

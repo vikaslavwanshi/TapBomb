@@ -10,11 +10,13 @@ TapBomb — real-time multiplayer dragon-snake battle game. Players control a dr
 
 ## Bash commands
 - `npm run dev` — Vite dev server on port 3000 (frontend only)
-- `npm run party:dev` — PartyKit server on port 1999 (WebSocket game server)
+- `npm run party:dev` — game server on port 1999 (PartyServer on wrangler dev, WebSocket)
 - Both must run simultaneously for local development
 - `npm run build` — production build
 - `npm run typecheck` — TS check without emit
 - `npm run lint` — ESLint
+- `npm test` — Vitest unit tests (`npm run test:watch` for watch mode)
+- `npm run party:deploy` — deploy game server to Cloudflare Workers (tapbomb.vikaslavwanshi.workers.dev)
 
 ## Code style
 - Use TypeScript with strict mode enabled
