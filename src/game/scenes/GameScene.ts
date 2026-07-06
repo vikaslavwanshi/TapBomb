@@ -294,18 +294,19 @@ export class GameScene extends Phaser.Scene {
       this.add.image(seg.x, seg.y, 'dragon_body').setTint(tint).setDepth(5)
     );
 
-    // Wings — anchored at the shoulder (first segment), flapping in update
+    // Wings — anchored at the shoulder (first segment), flapping in update.
+    // Right wing is the raw texture; left wing is Y-flipped.
     const wings: [Phaser.GameObjects.Image, Phaser.GameObjects.Image] = [
       this.add.image(player.head.x, player.head.y, 'dragon_wing')
-        .setTint(tint).setDepth(4).setOrigin(0.08, 0.55),
+        .setTint(tint).setDepth(4).setOrigin(0.06, 0.5),
       this.add.image(player.head.x, player.head.y, 'dragon_wing')
-        .setTint(tint).setDepth(4).setOrigin(0.08, 0.55).setFlipY(true),
+        .setTint(tint).setDepth(4).setOrigin(0.06, 0.5).setFlipY(true),
     ];
 
     // Two pairs of legs along the body
     const legs = [0, 1, 2, 3].map(() =>
       this.add.image(player.head.x, player.head.y, 'dragon_leg')
-        .setTint(tint).setDepth(4).setOrigin(0.5, 0.15).setVisible(false)
+        .setTint(tint).setDepth(4).setOrigin(0.35, 0.3).setVisible(false)
     );
 
     const nameTag = this.add.text(player.head.x, player.head.y - player.size - 14, player.name, {
@@ -359,20 +360,22 @@ export class GameScene extends Phaser.Scene {
       sp.body[i]?.setPosition(seg.x, seg.y).setScale(Math.max(0.3, scale * (1 - i * 0.008)));
     });
 
-    // Wings flap at the shoulder — mirrored across the heading
+    // Wings sweep back from the shoulder, mirrored across the heading,
+    // flapping toward/away from the body (geometry matched to art workbench)
     const shoulder = player.segments[0] ?? { ...player.head, angle: player.angle };
-    const flap = Math.sin(this.time.now / 130) * 0.35;
-    const wingScale = scale * 0.85;
+    const flap = Math.sin(this.time.now / 140) * 0.28;
+    const sweep = 2.35; // radians off the heading — back and outward
+    const wingScale = scale * 1.2;
     sp.wings[0]
       .setPosition(shoulder.x, shoulder.y)
-      .setRotation(shoulder.angle - 1.9 - flap)
+      .setRotation(shoulder.angle + sweep - flap)
       .setScale(wingScale);
     sp.wings[1]
       .setPosition(shoulder.x, shoulder.y)
-      .setRotation(shoulder.angle + 1.9 + flap)
+      .setRotation(shoulder.angle - sweep + flap)
       .setScale(wingScale);
 
-    // Legs: two pairs at segments 1 and 3, splayed out with a walking swing
+    // Legs: two pairs at segments 1 and 3, claws angled forward-outward
     const legSegs = [player.segments[1], player.segments[3]];
     legSegs.forEach((seg, pair) => {
       const left = sp.legs[pair * 2];
@@ -382,21 +385,21 @@ export class GameScene extends Phaser.Scene {
         right?.setVisible(false);
         return;
       }
-      const swing = Math.sin(this.time.now / 160 + pair * 1.6) * 0.25;
-      const offset = player.size * scale * 0.45;
+      const swing = Math.sin(this.time.now / 160 + pair * 1.6) * 0.2;
+      const offset = player.size * scale * 0.5;
       const perpX = Math.cos(seg.angle + Math.PI / 2);
       const perpY = Math.sin(seg.angle + Math.PI / 2);
-      left
-        ?.setVisible(true)
-        .setPosition(seg.x - perpX * offset, seg.y - perpY * offset)
-        .setRotation(seg.angle - 2.3 + swing)
-        .setScale(scale * 0.75);
       right
         ?.setVisible(true)
         .setPosition(seg.x + perpX * offset, seg.y + perpY * offset)
-        .setRotation(seg.angle + 2.3 - swing)
-        .setScale(scale * 0.75)
-        .setFlipX(true);
+        .setRotation(seg.angle + 0.5 - swing)
+        .setScale(scale * 0.6);
+      left
+        ?.setVisible(true)
+        .setPosition(seg.x - perpX * offset, seg.y - perpY * offset)
+        .setRotation(seg.angle - 0.5 + swing)
+        .setScale(scale * 0.6)
+        .setFlipY(true);
     });
 
     sp.nameTag.setPosition(player.head.x, player.head.y - player.size * scale - 14);
